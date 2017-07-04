@@ -215,117 +215,128 @@ def subsample(seqs, k, fn = None, fields=[1], sep='|', multiset_method = 'hierar
             quotas = Counter(quotas) - subsampled_seqs
         return dict(subsampled_seqs)
 
-				def convert_coordinate(refseq, compareseq, coordinate):
-				    '''
-				    In: ungapped reference sequence, gapped (aligned) compare sequence, position to convert
-				    Out: coordinate of corresponding condition in the aligned sequence
-				    '''
-				    coordinate = coordinate - 1 # Adjust for python coordinates
-				    if isinstance(refseq, SeqRecord):
-				        refseq = str(refseq.seq)
-				    if isinstance(compareseq, SeqRecord):
-				        compareseq = str(compareseq.seq)
-				    #check to make sure we have at least 100bp of downstream sequence, no more than 40bp of which are gaps, to match on
-				    assert len(refseq[coordinate:]) >= 100 and refseq[coordinate:coordinate+100].count('-')<40, 'ERROR: Not enough downstream context available for '+str(coordinate+1)
-				    #check to make sure the given coordinate doesn't correspond to a gap in the reference sequence
-				    assert refseq[coordinate] != '-', 'ERROR! Coordinate '+str(coordinate+1)+' is a gap in the reference sequence.'
+def convert_coordinate(refseq, compareseq, coordinate):
+    '''
+    In: ungapped reference sequence, gapped (aligned) compare sequence, position to convert
+    Out: coordinate of corresponding condition in the aligned sequence
+    '''
+    coordinate = coordinate - 1 # Adjust for python coordinates
+    if isinstance(refseq, SeqRecord):
+        refseq = str(refseq.seq)
+    if isinstance(compareseq, SeqRecord):
+        compareseq = str(compareseq.seq)
+    #check to make sure we have at least 100bp of downstream sequence, no more than 40bp of which are gaps, to match on
+    assert len(refseq[coordinate:]) >= 100 and refseq[coordinate:coordinate+100].count('-')<40, 'ERROR: Not enough downstream context available for '+str(coordinate+1)
+    #check to make sure the given coordinate doesn't correspond to a gap in the reference sequence
+    assert refseq[coordinate] != '-', 'ERROR! Coordinate '+str(coordinate+1)+' is a gap in the reference sequence.'
 
-				    reference = refseq[coordinate:coordinate+100].replace('-', '')
-				    refpattern = '-*'.join(list(reference)) # Match in new sequence while ignoring gaps
-				    matchlist = re.findall(refpattern, compareseq, flags=re.IGNORECASE) # Check to make sure we get one and only one match
-				    assert len(matchlist) == 1, 'ERROR: found %d matches for coordinate %d'%(len(matchlist), coordinate+1)
-				    return re.search(refpattern, compareseq, flags=re.IGNORECASE).start()+1 #return the converted coordinate (adjusted back to genomic coordinates)
+    reference = refseq[coordinate:coordinate+100].replace('-', '')
+    refpattern = '-*'.join(list(reference)) # Match in new sequence while ignoring gaps
+    matchlist = re.findall(refpattern, compareseq, flags=re.IGNORECASE) # Check to make sure we get one and only one match
+    assert len(matchlist) == 1, 'ERROR: found %d matches for coordinate %d'%(len(matchlist), coordinate+1)
+    return re.search(refpattern, compareseq, flags=re.IGNORECASE).start()+1 #return the converted coordinate (adjusted back to genomic coordinates)
 
-				def split_alignment(alignment, positions, flanking = True, prune=0.25, write = True, ofilestem='split'):
-				    '''
-				    In: alignment path or list of seq objects, integer position to split the alignment along, or a list of them.
+def split_alignment(alignment, positions, flanking = True, prune=0.25, write = True, ofilestem='split'):
+    '''
+    In: alignment path or list of seq objects, integer position to split the alignment along, or a list of them.
 
-				    Args:
-				    flanking: if True, includes the segments [0, firstposition], [lastposition, end].
-				    prune: if float between 0 and 1, removes any sequences with <= that proportion of non-gapped/N sites
-				    ofilestem, write: if True, write each segmet to cwd$ ofilestem_start_end.fasta
+    Args:
+    flanking: if True, includes the segments [0, firstposition], [lastposition, end].
+    prune: if float between 0 and 1, removes any sequences with <= that proportion of non-gapped/N sites
+    ofilestem, write: if True, write each segmet to cwd$ ofilestem_start_end.fasta
 
-				    N.B.: Splitting is python-esque (includes start point, does not include endpoint)
+    N.B.: Splitting is python-esque (includes start point, does not include endpoint)
 
-				    Out: Returns dictionary of {(start, end): [split alignment objects]};
-				    optionally writes each segment to ofilestem_start_end.fasta
-				    '''
-				    ## Handle input data types
-				    if isinstance(alignment, str):
-				        alignment = load(alignment)
-				    else:
-				        assert isinstance(alignment, list) and all([isinstance(i, SeqRecord) for i in alignment]) # If not a path name, should be a list of Seq objects
-				    assert len(set([len(i.seq) for i in alignment])) == 1, 'ERROR: All sequences must be the same length (aligned)' ## All sequences are the same length
+    Out: Returns dictionary of {(start, end): [split alignment objects]};
+    optionally writes each segment to ofilestem_start_end.fasta
+    '''
+    ## Handle input data types
+    if isinstance(alignment, str):
+        alignment = load(alignment)
+    else:
+        assert isinstance(alignment, list) and all([isinstance(i, SeqRecord) for i in alignment]) # If not a path name, should be a list of Seq objects
+    assert len(set([len(i.seq) for i in alignment])) == 1, 'ERROR: All sequences must be the same length (aligned)' ## All sequences are the same length
 
-				    if isinstance(positions, int):
-				        positions = [positions]
-				        assert flanking == True, 'ERROR: only one position given. If you want [0, position], [position, end], then run with flanking=True'
-				    else:
-				        assert isinstance(positions, list) and all([isinstance(i, int) for i in positions])
+    ambiguity_codes = {'nucleotide': ['Y', 'S', 'W', 'K', 'M', 'B', 'V', 'D', 'H', ## nucleotide or aa data??
+                          'X', 'N', '-', '?', '*', '.'],
+                       'amino_acid': ['B', 'Z', 'X', 'J', 'O', 'U',
+                          'X', '?', '*', '.']}
 
-				    positions.sort()
-
-				    ## Add endpoints if flanking=True
-				    if flanking:
-				        positions.insert(0, 0)
-				        positions.append(len(alignment[0]))
-
-				    ## Split alignment
-				    splits = {}
-				    for i, p in enumerate(positions[:-1]):
-				        start = positions[i]
-				        end = positions[i+1] ## like python splitting, does not include endpoint
-
-				        if all([isinstance(prune, float), prune >= 0., prune <= 1.]): # if removing uninformative sequences....
-				            splits['%d_%d'%(start, end)] = []
-				            for s in alignment:
-				                ambiguity_codes = []
-				                prop_ambiguous = sum([ 1. if site in ambiguity_codes else 0. for site in str(s.seq)]) / float(len(s.seq))
-				                if prop_ambiguous <= prune:
-				                    splits['%d_%d'%(start, end)].append(s)
-				        else:
-				            splits['%d_%d'%(start, end)] = [s[start:end] for s in alignment]
-
-				    ## Optionally write out sequences
-				    if write == True:
-				        for ((start, end), seqs) in splits.iteritems():
-				            SeqIO.write(seqs, '%s_%s_%s.fasta'%(ofilestem, start, end), 'fasta')
-
-				    return splits
+    if re.search('[^ACGTUYSWKMBVDHX\-\*\.\?]', str(alignment[0].seq).upper()) != None: ## Non-nucleotide bases
+        ambiguity_codes = ambiguity_codes['nucleotide']
+    else:
+        ambiguity_codes = ambiguity_codes['amino_acid']
 
 
-				def extract_gene(alignment, genes, reference_file=None, gene_locs=None, reference_seq=None, prune=0.25, write = True):
-				    '''
-				    In: alignment path or list of seq objects, name(s) of genes to extract (str or list),
-				    reference file path (overrides) or output from load_reference,
-				    max ambiguous proportion for pruning in split_alignment, boolean for whether to write each gene alignment to file.
+    if isinstance(positions, int):
+        positions = [positions]
+        assert flanking == True, 'ERROR: only one position given. If you want [0, position], [position, end], then run with flanking=True'
+    else:
+        assert isinstance(positions, list) and all([isinstance(i, int) for i in positions])
 
-				    Out: Returns dictionary of {gene: [split alignment objects]};
-				    optionally writes each segment to gene_start_end.fasta
-				    '''
+    positions.sort()
 
-				    ## Handle input data types
-				    if isinstance(alignment, str):
-				        alignment = load(alignment)
-				    else:
-				        assert isinstance(alignment, list) and all([isinstance(i, SeqRecord) for i in alignment]) # If not a path name, should be a list of Seq objects
-				    assert len(set([len(i.seq) for i in alignment])) == 1, 'ERROR: All sequences must be the same length (aligned)' ## All sequences are the same length
+    ## Add endpoints if flanking=True
+    if flanking:
+        positions.insert(0, 0)
+        positions.append(len(alignment[0]))
 
-				    if isinstance(genes, str):
-				        genes = [ genes ]
+    ## Split alignment
+    splits = {}
+    for i, p in enumerate(positions[:-1]):
+        start = positions[i]
+        end = positions[i+1] ## like python splitting, does not include endpoint
 
-				    if reference_file == None:
-				        assert isinstance(gene_locs, dict) and isinstance(reference_seq, SeqRecord), "ERROR: Either provide path to reference file or output from load_reference"
-				    else:
-				        gene_locs, reference_seq = load_reference(reference_file)
-				    assert reference_seq.name in [i.name for i in alignment], "ERROR: Reference seq must be in alignment"
-				    aligned_ref_seq = [i for i in alignment if i.name == reference_seq.name][0]
+        if all([isinstance(prune, float), prune >= 0., prune <= 1.]): # if removing uninformative sequences....
+            splits['%d_%d'%(start, end)] = []
 
-				    extracted_genes = {}
-				    for gene in genes:
-				        assert gene in gene_locs, ("ERROR: gene names must be in reference file. Try: ", gene_locs.keys())
+            for s in alignment:
+                prop_ambiguous = sum([ 1. if site in ambiguity_codes else 0. for site in str(s.seq)]) / float(len(s.seq))
+                if prop_ambiguous <= prune:
+                    splits['%d_%d'%(start, end)].append(s)
+        else:
+            splits['%d_%d'%(start, end)] = [s[start:end] for s in alignment]
 
-				        start, end = [convert_coordinate(reference_seq, aligned_ref_seq, i) for i in gene_locs[gene]]
-				        extracted_genes[gene] = split_alignment(alignment, [start, end], flanking=False, prune=prune, write=write, ofilestem=gene)['%s_%s'%(start, end)]
+    ## Optionally write out sequences
+    if write == True:
 
-				    return extracted_genes
+        for loc, seqs in splits.iteritems():
+            SeqIO.write(seqs, '%s_%s.fasta'%(ofilestem, loc), 'fasta')
+
+    return splits
+
+def extract_gene(alignment, genes, reference_file=None, gene_locs=None, reference_seq=None, prune=0.25, write = True):
+    '''
+    In: alignment path or list of seq objects, name(s) of genes to extract (str or list),
+    reference file path (overrides) or output from load_reference,
+    max ambiguous proportion for pruning in split_alignment, boolean for whether to write each gene alignment to file.
+
+    Out: Returns dictionary of {gene: [split alignment objects]};
+    optionally writes each segment to gene_start_end.fasta
+    '''
+
+    ## Handle input data types
+    if isinstance(alignment, str):
+        alignment = load(alignment)
+    else:
+        assert isinstance(alignment, list) and all([isinstance(i, SeqRecord) for i in alignment]) # If not a path name, should be a list of Seq objects
+    assert len(set([len(i.seq) for i in alignment])) == 1, 'ERROR: All sequences must be the same length (aligned)' ## All sequences are the same length
+
+    if isinstance(genes, str):
+        genes = [ genes ]
+
+    if reference_file == None:
+        assert isinstance(gene_locs, dict) and isinstance(reference_seq, SeqRecord), "ERROR: Either provide path to reference file or output from load_reference"
+    else:
+        gene_locs, reference_seq = load_reference(reference_file)
+    assert reference_seq.name in [i.name for i in alignment], "ERROR: Reference seq must be in alignment"
+    aligned_ref_seq = [i for i in alignment if i.name == reference_seq.name][0]
+
+    extracted_genes = {}
+    for gene in genes:
+        assert gene in gene_locs, ("ERROR: gene names must be in reference file. Try: ", gene_locs.keys())
+
+        start, end = [convert_coordinate(reference_seq, aligned_ref_seq, i) for i in gene_locs[gene]]
+        extracted_genes[gene] = split_alignment(alignment, [start, end], flanking=False, prune=prune, write=write, ofilestem=gene)['%s_%s'%(start, end)]
+
+    return extracted_genes
